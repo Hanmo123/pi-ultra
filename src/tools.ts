@@ -3,11 +3,6 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { SubagentManager } from "./subagent-manager.ts";
 
-const WorktreeSchema = Type.Object({
-	branch: Type.Optional(Type.String({ description: "Branch name to create for the subagent worktree" })),
-	path: Type.Optional(Type.String({ description: "Optional explicit worktree path" })),
-});
-
 const ThinkingLevelSchema = Type.Union(
 	[
 		Type.Literal("off"),
@@ -30,29 +25,30 @@ export function createSpawnSubagentTool(manager: SubagentManager) {
 	return defineTool({
 		name: "spawn_subagent",
 		label: "Spawn Subagent",
-		description: "Spawn a persistent subagent to work on a delegated task.",
+		description: "Spawn a persistent subagent to work on a delegated task in an isolated worktree.",
 		promptGuidelines: [
 			"Use spawn_subagent when you need a separate agent to explore, code, or test in parallel.",
 			"Use spawn_subagent instead of doing the delegated work directly in leader mode.",
-			"Use spawn_subagent with worktree when multiple coding subagents need isolated git state in parallel.",
+			"All subagents work in isolated worktrees with separate git branches.",
+			"Specify a descriptive branch name for the subagent's work.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "Task for the subagent" }),
+			branch: Type.String({ description: "Branch name for the subagent's worktree (required)" }),
 			cwd: Type.Optional(Type.String({ description: "Working directory for the subagent" })),
 			label: Type.Optional(Type.String({ description: "Optional readable subagent label" })),
 			model: Type.Optional(ModelChoiceSchema),
-			worktree: Type.Optional(WorktreeSchema),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const record = await manager.spawn({
 				task: params.task,
+				branch: params.branch,
 				cwd: params.cwd ?? ctx.cwd,
 				label: params.label,
 				model: params.model,
-				worktree: params.worktree,
 			});
 			return {
-				content: [{ type: "text", text: `Spawned subagent ${record.id}.` }],
+				content: [{ type: "text", text: `Spawned subagent ${record.id} in worktree branch ${record.worktree?.branch}.` }],
 				details: { record },
 			};
 		},
@@ -93,15 +89,23 @@ export function createMergeSubagentWorktreeTool(manager: SubagentManager) {
 		description: "Merge a worktree-backed subagent branch into a target branch.",
 		promptGuidelines: [
 			"Use merge_subagent_worktree when a worktree-backed subagent has completed coding and its branch should be merged.",
+			"Use strategy 'merge' (default) for a merge commit with --no-ff, or 'squash' to squash all commits into one.",
+			"If conflicts are reported, send a message to the subagent with conflict details so it can resolve them in its worktree.",
 		],
 		parameters: Type.Object({
 			id: Type.String({ description: "Subagent id" }),
 			into: Type.Optional(Type.String({ description: "Target branch to merge into" })),
+			strategy: Type.Optional(
+				Type.Union([Type.Literal("merge"), Type.Literal("squash")], {
+					description: "Merge strategy: 'merge' (default, --no-ff) or 'squash' (--squash)",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params) {
-			const result = await manager.merge(params.id, params.into);
+			const result = await manager.merge(params.id, params.into, params.strategy);
+			const strategyLabel = params.strategy === "squash" ? " (squashed)" : "";
 			const text = result.merged
-				? `Merged ${result.record.worktree?.branch} into ${params.into ?? "current branch"}.`
+				? `Merged ${result.record.worktree?.branch} into ${params.into ?? "current branch"}${strategyLabel}.`
 				: `Merge of ${result.record.worktree?.branch} reported conflicts: ${result.conflictedFiles.join(", ") || "(none listed)"}`;
 			return {
 				content: [{ type: "text", text }],

@@ -34,7 +34,7 @@ export class RpcProcessInstance {
 		const rpcCommand = getSpawnCommand();
 		this.process = spawn(rpcCommand.command, rpcCommand.args, {
 			cwd: options.cwd,
-			env: process.env,
+			env: { ...process.env, PI_SUBAGENT_MODE: "1" },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		if (!this.process.stdin || !this.process.stdout) {

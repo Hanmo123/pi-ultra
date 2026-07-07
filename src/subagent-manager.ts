@@ -119,22 +119,19 @@ export class SubagentManager {
 
 	async spawn(options: {
 		task: string;
+		branch: string;
 		cwd: string;
 		label?: string;
 		model?: ModelChoice;
-		worktree?: { branch?: string; path?: string };
 	}): Promise<SubagentRecord> {
 		const id = this.createId(options.label);
-		const worktree = options.worktree
-			? await createWorktree({
-					cwd: options.cwd,
-					branch: options.worktree.branch ?? `${id}-branch`,
-					path: options.worktree.path,
-				})
-			: undefined;
+		const worktree = await createWorktree({
+			cwd: options.cwd,
+			branch: options.branch,
+		});
 		const subagent = createSubagent({
 			id,
-			cwd: worktree?.path ?? options.cwd,
+			cwd: worktree.path,
 			label: options.label,
 			worktree,
 		});
@@ -196,6 +193,7 @@ export class SubagentManager {
 	async merge(
 		id: string,
 		into?: string,
+		strategy?: "merge" | "squash",
 	): Promise<{
 		record: SubagentRecord;
 		merged: boolean;
@@ -207,7 +205,7 @@ export class SubagentManager {
 		if (!record.worktree) {
 			throw new Error(`Subagent ${id} has no worktree branch to merge`);
 		}
-		const result = await mergeBranch({ cwd: record.worktree.repoRoot, branch: record.worktree.branch, into });
+		const result = await mergeBranch({ cwd: record.worktree.repoRoot, branch: record.worktree.branch, into, strategy });
 		return {
 			record,
 			merged: result.merged,

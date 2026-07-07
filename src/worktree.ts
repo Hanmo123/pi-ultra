@@ -1,8 +1,7 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, join, resolve } from "node:path";
 
 export interface WorktreeRecord {
 	branch: string;
@@ -50,15 +49,23 @@ export async function findRepoRoot(cwd: string): Promise<string> {
 	return result.stdout.trim();
 }
 
-export function createWorktreeDir(repoRoot: string, branch: string): string {
-	const baseDir = join(tmpdir(), "pi-leader-worktrees", randomUUID());
+async function getRepoIdentifier(repoRoot: string): Promise<string> {
+	const folderName = basename(repoRoot);
+	const result = await execGit(["rev-parse", "--short=6", "HEAD"], repoRoot);
+	const hash = result.code === 0 ? result.stdout.trim() : "unknown";
+	return `${folderName}-${hash}`;
+}
+
+export async function createWorktreeDir(repoRoot: string, branch: string): Promise<string> {
+	const repoId = await getRepoIdentifier(repoRoot);
+	const baseDir = join(homedir(), "pi-worktrees", repoId);
 	mkdirSync(baseDir, { recursive: true });
-	return join(baseDir, `${repoRoot.split("/").pop() || "repo"}-${branch}`);
+	return join(baseDir, branch);
 }
 
 export async function createWorktree(options: { cwd: string; branch: string; path?: string }): Promise<WorktreeRecord> {
 	const repoRoot = await findRepoRoot(options.cwd);
-	const worktreePath = resolve(options.path ?? createWorktreeDir(repoRoot, options.branch));
+	const worktreePath = options.path ? resolve(options.path) : await createWorktreeDir(repoRoot, options.branch);
 	const result = await execGit(["worktree", "add", worktreePath, "-b", options.branch], repoRoot);
 	if (result.code !== 0) {
 		throw new Error(result.stderr || result.stdout || `Failed to create worktree for ${options.branch}`);
@@ -75,7 +82,7 @@ export async function removeWorktree(record: WorktreeRecord): Promise<void> {
 	if (result.code !== 0) {
 		throw new Error(result.stderr || result.stdout || `Failed to remove worktree ${record.path}`);
 	}
-	if (record.path.startsWith(join(tmpdir(), "pi-leader-worktrees"))) {
+	if (record.path.startsWith(join(homedir(), "pi-worktrees"))) {
 		try {
 			rmSync(record.path, { recursive: true, force: true });
 		} catch {
@@ -84,7 +91,12 @@ export async function removeWorktree(record: WorktreeRecord): Promise<void> {
 	}
 }
 
-export async function mergeBranch(options: { cwd: string; branch: string; into?: string }): Promise<MergeResult> {
+export async function mergeBranch(options: {
+	cwd: string;
+	branch: string;
+	into?: string;
+	strategy?: "merge" | "squash";
+}): Promise<MergeResult> {
 	const repoRoot = await findRepoRoot(options.cwd);
 	const target = options.into ?? (await execGit(["branch", "--show-current"], repoRoot)).stdout.trim();
 	if (!target) {
@@ -94,7 +106,9 @@ export async function mergeBranch(options: { cwd: string; branch: string; into?:
 	if (switchResult.code !== 0) {
 		throw new Error(switchResult.stderr || switchResult.stdout || `Failed to checkout ${target}`);
 	}
-	const mergeResult = await execGit(["merge", "--no-ff", options.branch], repoRoot);
+	const strategy = options.strategy ?? "merge";
+	const mergeArgs = strategy === "squash" ? ["merge", "--squash", options.branch] : ["merge", "--no-ff", options.branch];
+	const mergeResult = await execGit(mergeArgs, repoRoot);
 	if (mergeResult.code === 0) {
 		return {
 			branch: options.branch,

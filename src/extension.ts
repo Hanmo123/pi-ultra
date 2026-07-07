@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { LEADER_SYSTEM_PROMPT } from "./prompt.ts";
+import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
 import { SubagentManager } from "./subagent-manager.ts";
 import {
 	createListAvailableModelsTool,
@@ -111,6 +111,12 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 		});
 
 		pi.on("before_agent_start", async (event) => {
+			const isSubagent = process.env.PI_SUBAGENT_MODE === "1";
+			if (isSubagent) {
+				return {
+					systemPrompt: `${event.systemPrompt}\n\n${SUBAGENT_SYSTEM_PROMPT}`,
+				};
+			}
 			if (!leaderEnabled) {
 				return;
 			}
