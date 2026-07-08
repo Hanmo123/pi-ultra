@@ -1,32 +1,39 @@
+import { basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
+import { LEADER_SYSTEM_PROMPT } from "./prompt.ts";
 import { SubagentManager } from "./subagent-manager.ts";
 import {
 	createListAvailableModelsTool,
-	createMergeSubagentWorktreeTool,
 	createSendToSubagentTool,
 	createSpawnSubagentTool,
 } from "./tools.ts";
 
 export interface LeaderExtensionOptions {
-	createManager?: (pi: ExtensionAPI) => SubagentManager;
+	createManager?: (pi: ExtensionAPI, leaderExtensionName: string) => SubagentManager;
 }
 
 const LEADER_STATE_TYPE = "leader-state";
+const LEADER_EXTENSION_PATH = fileURLToPath(import.meta.url);
+const LEADER_EXTENSION_NAMES = [
+	basename(LEADER_EXTENSION_PATH).replace(/\.(ts|js)$/u, ""),
+	basename(dirname(LEADER_EXTENSION_PATH)),
+];
 
 function getLeaderTools(): string[] {
 	return [
 		"bash",
 		"spawn_subagent",
 		"send_to_subagent",
-		"merge_subagent_worktree",
 		"list_available_models",
 	];
 }
 
 export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 	return function leaderExtension(pi: ExtensionAPI): void {
-		const manager = options.createManager ? options.createManager(pi) : new SubagentManager(pi);
+		const manager = options.createManager
+			? options.createManager(pi, LEADER_EXTENSION_NAMES[0])
+			: new SubagentManager(pi, { leaderExtensionNames: LEADER_EXTENSION_NAMES });
 		let leaderEnabled = true;
 		let toolsBeforeLeader: string[] | undefined;
 
@@ -63,7 +70,6 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 
 		pi.registerTool(createSpawnSubagentTool(manager));
 		pi.registerTool(createSendToSubagentTool(manager));
-		pi.registerTool(createMergeSubagentWorktreeTool(manager));
 		pi.registerTool(createListAvailableModelsTool());
 
 		pi.registerCommand("leader", {
@@ -112,12 +118,6 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 		});
 
 		pi.on("before_agent_start", async (event) => {
-			const isSubagent = process.env.PI_SUBAGENT_MODE === "1";
-			if (isSubagent) {
-				return {
-					systemPrompt: `${event.systemPrompt}\n\n${SUBAGENT_SYSTEM_PROMPT}`,
-				};
-			}
 			if (!leaderEnabled) {
 				return;
 			}
