@@ -1,6 +1,12 @@
 import { createRequire } from "node:module";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, AgentRecord as PiSubagentRecord } from "@tintinweb/pi-subagents/dist/types.js";
+import {
+	cleanupBranchWorktree,
+	createBranchWorktree,
+	type BranchWorktreeCleanupResult,
+	type BranchWorktreeInfo,
+} from "./branch-worktree.ts";
 import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
 import { TrackerStore } from "./tracker-store.ts";
 import type { ModelChoice, SubagentRecord, TrackerRecord } from "./types.ts";
@@ -24,7 +30,6 @@ export interface SubagentUpdateDetail {
 }
 
 const DEFAULT_SUBAGENT_TYPE = "general-purpose";
-const DEFAULT_ISOLATION = "worktree";
 function stripLeaderPrompt(systemPrompt: string): string {
 	const suffix = `\n\n${LEADER_SYSTEM_PROMPT}`;
 	if (systemPrompt.endsWith(suffix)) {
@@ -69,6 +74,8 @@ export class SubagentManager {
 			label?: string;
 			model?: ModelChoice;
 			trackerId: string;
+			worktree: BranchWorktreeInfo;
+			worktreeResult?: BranchWorktreeCleanupResult;
 		}
 	>();
 	private readonly pendingUpdates = new Map<string, SubagentUpdateDetail>();
@@ -154,11 +161,17 @@ export class SubagentManager {
 
 	private mapRecord(record: PiSubagentRecord): SubagentRecord {
 		const metadata = this.metadata.get(record.id);
-		const branch = record.worktreeResult?.branch ?? record.worktree?.branch;
+		const localWorktree = metadata?.worktree;
+		const localResult = metadata?.worktreeResult;
+		const packageWorktree = record.worktree;
+		const packageResult = record.worktreeResult;
+		const branch = localResult?.branch ?? packageResult?.branch ?? localWorktree?.branch ?? packageWorktree?.branch;
+		const worktree = localWorktree ?? packageWorktree;
+		const worktreeResult = localResult ?? packageResult;
 		return {
 			id: record.id,
 			createdAt: new Date(record.startedAt).toISOString(),
-			cwd: metadata?.cwd ?? record.worktree?.workPath ?? record.worktree?.path ?? "",
+			cwd: metadata?.cwd ?? worktree?.workPath ?? worktree?.path ?? "",
 			description: metadata?.description ?? record.description,
 			label: metadata?.label,
 			trackerId: metadata?.trackerId,
@@ -167,21 +180,41 @@ export class SubagentManager {
 			error: record.error,
 			status: record.status,
 			subagentType: record.type,
-			worktree: record.worktree
+			worktree: worktree
 				? {
-					branch,
-					path: record.worktree.path,
-					baseSha: record.worktree.baseSha,
-					workPath: record.worktree.workPath,
+					branch: branch ?? worktree.branch,
+					path: worktree.path,
+					baseSha: worktree.baseSha,
+					workPath: worktree.workPath,
 				}
 				: undefined,
-			worktreeResult: record.worktreeResult
+			worktreeResult: worktreeResult
 				? {
-					hasChanges: record.worktreeResult.hasChanges,
-					branch: record.worktreeResult.branch,
+					hasChanges: worktreeResult.hasChanges,
+					branch: worktreeResult.branch,
 				}
 				: undefined,
 		};
+	}
+
+	private cleanupManagedWorktree(record: PiSubagentRecord): BranchWorktreeCleanupResult | undefined {
+		const metadata = this.metadata.get(record.id);
+		if (!metadata?.worktree) {
+			return undefined;
+		}
+		if (metadata.worktreeResult) {
+			return metadata.worktreeResult;
+		}
+
+		const result = cleanupBranchWorktree(metadata.cwd, metadata.worktree, metadata.description);
+		metadata.worktreeResult = result;
+		if (result.hasChanges && result.branch && !result.error) {
+			record.result = `${record.result ?? ""}\n\n---\nChanges saved to branch \`${result.branch}\` in \`${metadata.cwd}\`. Merge with: \`git merge ${result.branch}\` (run in \`${metadata.cwd}\`).`.trim();
+		}
+		if (result.error) {
+			record.result = `${record.result ?? ""}\n\n---\nWorktree cleanup warning: ${result.error}\nWorktree path: ${result.path ?? metadata.worktree.path}`.trim();
+		}
+		return result;
 	}
 
 	private buildUpdate(record: SubagentRecord, archive?: { trackerPath?: string; branchPath?: string; error?: string }): SubagentUpdateDetail {
@@ -198,6 +231,7 @@ export class SubagentManager {
 	}
 
 	private async handleSubagentComplete(record: PiSubagentRecord): Promise<void> {
+		this.cleanupManagedWorktree(record);
 		const mapped = this.mapRecord(record);
 		let archive: { trackerPath?: string; branchPath?: string; error?: string } | undefined;
 		if (mapped.trackerId) {
@@ -261,17 +295,28 @@ export class SubagentManager {
 		const tracker = options.trackerId
 			? await this.trackerStore.get(options.cwd, options.trackerId)
 			: await this.trackerStore.create(options.cwd, { title: description, description: options.task });
-		const id = this.manager.spawn(this.pi, options.ctx, subagentType, options.task, {
-			description,
-			cwd: options.cwd,
-			model,
-			maxTurns: agentConfig?.maxTurns,
-			isolated: agentConfig?.isolated ?? false,
-			inheritContext: agentConfig?.inheritContext ?? false,
-			thinkingLevel: agentConfig?.thinking ?? options.model?.thinkingLevel,
-			isBackground: true,
-			isolation: agentConfig?.isolation ?? DEFAULT_ISOLATION,
-		});
+		const worktree = createBranchWorktree(options.cwd);
+		if (!worktree) {
+			throw new Error('Cannot run with isolation: "worktree" - failed to create a branch-backed git worktree. Initialize git and commit at least once, or fix git worktree creation.');
+		}
+
+		let id: string;
+		try {
+			id = this.manager.spawn(this.pi, options.ctx, subagentType, options.task, {
+				description,
+				cwd: worktree.workPath,
+				model,
+				maxTurns: agentConfig?.maxTurns,
+				isolated: agentConfig?.isolated ?? false,
+				inheritContext: agentConfig?.inheritContext ?? false,
+				thinkingLevel: agentConfig?.thinking ?? options.model?.thinkingLevel,
+				isBackground: true,
+				isolation: undefined,
+			});
+		} catch (error) {
+			cleanupBranchWorktree(options.cwd, worktree, description);
+			throw error;
+		}
 
 		this.metadata.set(id, {
 			cwd: options.cwd,
@@ -279,6 +324,7 @@ export class SubagentManager {
 			label: options.label?.trim() || undefined,
 			model: options.model,
 			trackerId: tracker.id,
+			worktree,
 		});
 
 		return this.mapRecord(this.requireRecord(id));
@@ -335,11 +381,18 @@ export class SubagentManager {
 		if (!this.manager.abort(id)) {
 			throw new Error(`Unknown subagent: ${id}`);
 		}
-		return this.mapRecord(this.requireRecord(id));
+		const record = this.requireRecord(id);
+		if (!record.promise) {
+			this.cleanupManagedWorktree(record);
+		}
+		return this.mapRecord(record);
 	}
 
 	async shutdown(): Promise<void> {
 		this.manager.abortAll();
+		for (const record of this.manager.listAgents()) {
+			this.cleanupManagedWorktree(record);
+		}
 		this.manager.dispose();
 		this.metadata.clear();
 		this.pendingUpdates.clear();
