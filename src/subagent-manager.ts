@@ -1,12 +1,15 @@
+import { createRequire } from "node:module";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { AgentManager as PiSubagentsAgentManager } from "@tintinweb/pi-subagents/dist/agent-manager.js";
-import { DEFAULT_AGENTS } from "@tintinweb/pi-subagents/dist/default-agents.js";
-import { getAgentConfig, registerAgents, resolveType } from "@tintinweb/pi-subagents/dist/agent-types.js";
-import { loadCustomAgents } from "@tintinweb/pi-subagents/dist/custom-agents.js";
-import { resolveModel } from "@tintinweb/pi-subagents/dist/model-resolver.js";
 import type { AgentConfig, AgentRecord as PiSubagentRecord } from "@tintinweb/pi-subagents/dist/types.js";
 import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
 import type { ModelChoice, SubagentRecord } from "./types.ts";
+
+const require = createRequire(import.meta.url);
+const { AgentManager: PiSubagentsAgentManager } = require("@tintinweb/pi-subagents/dist/agent-manager.js") as typeof import("@tintinweb/pi-subagents/dist/agent-manager.js");
+const { DEFAULT_AGENTS } = require("@tintinweb/pi-subagents/dist/default-agents.js") as typeof import("@tintinweb/pi-subagents/dist/default-agents.js");
+const { getAgentConfig, registerAgents, resolveType } = require("@tintinweb/pi-subagents/dist/agent-types.js") as typeof import("@tintinweb/pi-subagents/dist/agent-types.js");
+const { loadCustomAgents } = require("@tintinweb/pi-subagents/dist/custom-agents.js") as typeof import("@tintinweb/pi-subagents/dist/custom-agents.js");
+const { resolveModel } = require("@tintinweb/pi-subagents/dist/model-resolver.js") as typeof import("@tintinweb/pi-subagents/dist/model-resolver.js");
 
 export interface SubagentUpdateDetail {
 	id: string;
