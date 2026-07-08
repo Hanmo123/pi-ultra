@@ -20,13 +20,42 @@ export interface WorktreeResult {
 	branch?: string;
 }
 
+export interface TrackerCommentRecord {
+	id: string;
+	createdAt: string;
+	author: string;
+	body: string;
+	subagentId?: string;
+	status?: string;
+	worktreePath?: string;
+}
+
+export interface TrackerBranchRecord {
+	branch: string;
+	createdAt: string;
+	updatedAt: string;
+	comments: TrackerCommentRecord[];
+}
+
+export interface TrackerRecord {
+	version: number;
+	id: string;
+	title: string;
+	description?: string;
+	repoPath: string;
+	path: string;
+	createdAt: string;
+	updatedAt: string;
+	branches: Record<string, TrackerBranchRecord>;
+}
+
 export interface SubagentRecord {
 	id: string;
 	createdAt: string;
 	cwd: string;
 	description: string;
 	label?: string;
-	lastAssistantText?: string;
+	trackerId?: string;
 	model?: ModelChoice;
 	result?: string;
 	error?: string;

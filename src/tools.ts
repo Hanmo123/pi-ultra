@@ -41,6 +41,7 @@ export function createSpawnSubagentTool(manager: SubagentManager) {
 			),
 			cwd: Type.Optional(Type.String({ description: "Working directory for the subagent" })),
 			label: Type.Optional(Type.String({ description: "Optional readable subagent label" })),
+			tracker_id: Type.Optional(Type.String({ description: "Tracker id to attach this subagent result to. If omitted, a tracker is created automatically." })),
 			model: Type.Optional(ModelChoiceSchema),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -51,11 +52,106 @@ export function createSpawnSubagentTool(manager: SubagentManager) {
 				label: params.label,
 				model: params.model,
 				subagentType: params.subagent_type,
+				trackerId: params.tracker_id,
 			});
 			const location = record.worktree?.path ? ` Worktree: ${record.worktree.path}.` : "";
+			const tracker = record.trackerId ? ` Tracker: ${record.trackerId}.` : "";
 			return {
-				content: [{ type: "text", text: `Spawned subagent ${record.id} (${record.subagentType}).${location}` }],
+				content: [{ type: "text", text: `Spawned subagent ${record.id} (${record.subagentType}).${tracker}${location}` }],
 				details: { record },
+			};
+		},
+	});
+}
+
+export function createCreateTrackerTool(manager: SubagentManager) {
+	return defineTool({
+		name: "create_tracker",
+		label: "Create Tracker",
+		description: "Create a file-backed tracker for a user issue or goal.",
+		promptGuidelines: [
+			"Use create_tracker for multi-step user goals before spawning several related subagents.",
+			"Pass the returned tracker id to spawn_subagent so related branch comments stay grouped.",
+		],
+		parameters: Type.Object({
+			title: Type.String({ description: "Short tracker title" }),
+			description: Type.Optional(Type.String({ description: "Tracker description or original user goal" })),
+			cwd: Type.Optional(Type.String({ description: "Repository or project directory for the tracker" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const record = await manager.createTracker(params.cwd ?? ctx.cwd, params.title, params.description);
+			return {
+				content: [{ type: "text", text: `Created tracker ${record.id}. Path: ${record.path}` }],
+				details: { record },
+			};
+		},
+	});
+}
+
+export function createListTrackersTool(manager: SubagentManager) {
+	return defineTool({
+		name: "list_trackers",
+		label: "List Trackers",
+		description: "List file-backed trackers for the current project.",
+		promptGuidelines: [
+			"Use list_trackers to find existing issue trackers before creating a new one.",
+		],
+		parameters: Type.Object({
+			cwd: Type.Optional(Type.String({ description: "Repository or project directory" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const records = await manager.listTrackers(params.cwd ?? ctx.cwd);
+			const text = records.map((record) => `${record.id} - ${record.title} (${Object.keys(record.branches).length} branch(es))\n${record.path}`).join("\n") || "No trackers.";
+			return {
+				content: [{ type: "text", text }],
+				details: { records },
+			};
+		},
+	});
+}
+
+export function createReadTrackerTool(manager: SubagentManager) {
+	return defineTool({
+		name: "read_tracker",
+		label: "Read Tracker",
+		description: "Read a tracker with all branch comments.",
+		promptGuidelines: [
+			"Use read_tracker after tracker update notifications instead of relying on subagent completion summaries.",
+			"Use read_tracker before reporting subagent results, comparing branches, or deciding merge readiness.",
+		],
+		parameters: Type.Object({
+			id: Type.String({ description: "Tracker id" }),
+			cwd: Type.Optional(Type.String({ description: "Repository or project directory" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await manager.readTracker(params.cwd ?? ctx.cwd, params.id);
+			return {
+				content: [{ type: "text", text: result.markdown }],
+				details: result,
+			};
+		},
+	});
+}
+
+export function createCommentTrackerTool(manager: SubagentManager) {
+	return defineTool({
+		name: "comment_tracker",
+		label: "Comment Tracker",
+		description: "Append a leader comment to a tracker branch.",
+		promptGuidelines: [
+			"Use comment_tracker to record leader decisions, merge conclusions, user clarifications, or review notes.",
+		],
+		parameters: Type.Object({
+			id: Type.String({ description: "Tracker id" }),
+			branch: Type.String({ description: "Branch name or logical branch bucket" }),
+			body: Type.String({ description: "Markdown comment body" }),
+			cwd: Type.Optional(Type.String({ description: "Repository or project directory" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const result = await manager.commentTracker(params.cwd ?? ctx.cwd, params.id, params.branch, params.body);
+			return {
+				content: [{ type: "text", text: `Commented on tracker ${result.record.id}. File: ${result.branchPath}` }],
+				details: result,
 			};
 		},
 	});

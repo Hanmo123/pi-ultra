@@ -2,7 +2,8 @@ import { createRequire } from "node:module";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, AgentRecord as PiSubagentRecord } from "@tintinweb/pi-subagents/dist/types.js";
 import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
-import type { ModelChoice, SubagentRecord } from "./types.ts";
+import { TrackerStore } from "./tracker-store.ts";
+import type { ModelChoice, SubagentRecord, TrackerRecord } from "./types.ts";
 
 const require = createRequire(import.meta.url);
 const { AgentManager: PiSubagentsAgentManager } = require("@tintinweb/pi-subagents/dist/agent-manager.js") as typeof import("@tintinweb/pi-subagents/dist/agent-manager.js");
@@ -15,32 +16,21 @@ export interface SubagentUpdateDetail {
 	id: string;
 	label?: string;
 	status: SubagentRecord["status"];
-	lastAssistantText?: string;
 	branch?: string;
+	trackerId?: string;
+	trackerPath?: string;
+	branchPath?: string;
 	error?: string;
 }
 
 const DEFAULT_SUBAGENT_TYPE = "general-purpose";
 const DEFAULT_ISOLATION = "worktree";
-const MAX_UPDATE_TEXT_CHARS = 600;
-
 function stripLeaderPrompt(systemPrompt: string): string {
 	const suffix = `\n\n${LEADER_SYSTEM_PROMPT}`;
 	if (systemPrompt.endsWith(suffix)) {
 		return systemPrompt.slice(0, -suffix.length).trimEnd();
 	}
 	return systemPrompt.replace(LEADER_SYSTEM_PROMPT, "").trim();
-}
-
-function truncateText(text: string | undefined, maxChars = MAX_UPDATE_TEXT_CHARS): string | undefined {
-	const normalized = text?.trim();
-	if (!normalized) {
-		return undefined;
-	}
-	if (normalized.length <= maxChars) {
-		return normalized;
-	}
-	return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
 }
 
 function summarizeTask(task: string): string {
@@ -57,16 +47,19 @@ function summarizeTask(task: string): string {
 function formatSubagentUpdate(updates: SubagentUpdateDetail[]): string {
 	const lines = updates.map((update) => {
 		const title = update.label ? `${update.id} (${update.label})` : update.id;
-		const summary = update.lastAssistantText?.trim() || update.error?.trim() || "(no assistant output)";
-		const branch = update.branch ? ` saved_branch=${update.branch}` : "";
-		return `- ${title} [${update.status}]${branch}: ${summary}`;
+		const tracker = update.trackerId ? ` tracker=${update.trackerId}` : "";
+		const branch = update.branch ? ` branch=${update.branch}` : "";
+		const path = update.branchPath ? ` file=${update.branchPath}` : "";
+		const error = update.error ? ` archive_error=${update.error}` : "";
+		return `- ${title} [${update.status}]${tracker}${branch}${path}${error}`;
 	});
-	return `Subagent update:\n${lines.join("\n")}`;
+	return `Tracker update:\n${lines.join("\n")}\nUse read_tracker to inspect subagent results.`;
 }
 
 export class SubagentManager {
 	protected readonly pi: ExtensionAPI;
 	private readonly manager: PiSubagentsAgentManager;
+	private readonly trackerStore: TrackerStore;
 	private readonly leaderExtensionNames: string[];
 	private readonly metadata = new Map<
 		string,
@@ -75,16 +68,18 @@ export class SubagentManager {
 			description: string;
 			label?: string;
 			model?: ModelChoice;
+			trackerId: string;
 		}
 	>();
 	private readonly pendingUpdates = new Map<string, SubagentUpdateDetail>();
 	private flushScheduled = false;
 
-	constructor(pi: ExtensionAPI, options: { leaderExtensionNames: string[] }) {
+	constructor(pi: ExtensionAPI, options: { leaderExtensionNames: string[]; trackerStore?: TrackerStore }) {
 		this.pi = pi;
 		this.leaderExtensionNames = options.leaderExtensionNames;
+		this.trackerStore = options.trackerStore ?? new TrackerStore();
 		this.manager = new PiSubagentsAgentManager((record) => {
-			this.handleSubagentComplete(record);
+			void this.handleSubagentComplete(record);
 		});
 	}
 
@@ -107,7 +102,7 @@ export class SubagentManager {
 		this.pendingUpdates.clear();
 		this.pi.sendMessage(
 			{
-				customType: "leader:subagent_update",
+				customType: "leader:tracker_update",
 				content: formatSubagentUpdate(updates),
 				details: { updates },
 				display: true,
@@ -166,7 +161,7 @@ export class SubagentManager {
 			cwd: metadata?.cwd ?? record.worktree?.workPath ?? record.worktree?.path ?? "",
 			description: metadata?.description ?? record.description,
 			label: metadata?.label,
-			lastAssistantText: truncateText(record.result ?? record.error),
+			trackerId: metadata?.trackerId,
 			model: metadata?.model,
 			result: record.result,
 			error: record.error,
@@ -189,19 +184,40 @@ export class SubagentManager {
 		};
 	}
 
-	private buildUpdate(record: SubagentRecord): SubagentUpdateDetail {
+	private buildUpdate(record: SubagentRecord, archive?: { trackerPath?: string; branchPath?: string; error?: string }): SubagentUpdateDetail {
 		return {
 			id: record.id,
 			label: record.label,
 			status: record.status,
-			lastAssistantText: record.lastAssistantText,
-			branch: record.worktreeResult?.branch,
-			error: record.error,
+			branch: record.worktreeResult?.branch ?? record.worktree?.branch,
+			trackerId: record.trackerId,
+			trackerPath: archive?.trackerPath,
+			branchPath: archive?.branchPath,
+			error: archive?.error,
 		};
 	}
 
-	private handleSubagentComplete(record: PiSubagentRecord): void {
-		this.enqueueUpdate(this.buildUpdate(this.mapRecord(record)));
+	private async handleSubagentComplete(record: PiSubagentRecord): Promise<void> {
+		const mapped = this.mapRecord(record);
+		let archive: { trackerPath?: string; branchPath?: string; error?: string } | undefined;
+		if (mapped.trackerId) {
+			try {
+				const branch = mapped.worktreeResult?.branch ?? mapped.worktree?.branch ?? "no-saved-branch";
+				const body = record.result?.trim() || record.error?.trim() || "(No subagent result.)";
+				const archived = await this.trackerStore.appendComment(mapped.cwd, mapped.trackerId, {
+					branch,
+					author: `subagent:${record.id}`,
+					body,
+					subagentId: record.id,
+					status: record.status,
+					worktreePath: mapped.worktree?.path,
+				});
+				archive = { trackerPath: archived.record.path, branchPath: archived.branchPath };
+			} catch (error) {
+				archive = { error: error instanceof Error ? error.message : String(error) };
+			}
+		}
+		this.enqueueUpdate(this.buildUpdate(mapped, archive));
 	}
 
 	private requireRecord(id: string): PiSubagentRecord {
@@ -219,6 +235,7 @@ export class SubagentManager {
 		label?: string;
 		model?: ModelChoice;
 		subagentType?: string;
+		trackerId?: string;
 	}): Promise<SubagentRecord> {
 		this.reloadAgentTypes(options.ctx.cwd, options.ctx.getSystemPrompt());
 
@@ -241,6 +258,9 @@ export class SubagentManager {
 		}
 
 		const description = options.label?.trim() || summarizeTask(options.task);
+		const tracker = options.trackerId
+			? await this.trackerStore.get(options.cwd, options.trackerId)
+			: await this.trackerStore.create(options.cwd, { title: description, description: options.task });
 		const id = this.manager.spawn(this.pi, options.ctx, subagentType, options.task, {
 			description,
 			cwd: options.cwd,
@@ -258,6 +278,7 @@ export class SubagentManager {
 			description,
 			label: options.label?.trim() || undefined,
 			model: options.model,
+			trackerId: tracker.id,
 		});
 
 		return this.mapRecord(this.requireRecord(id));
@@ -287,6 +308,27 @@ export class SubagentManager {
 
 	async get(id: string): Promise<SubagentRecord> {
 		return this.mapRecord(this.requireRecord(id));
+	}
+
+	async createTracker(cwd: string, title: string, description?: string): Promise<TrackerRecord> {
+		return this.trackerStore.create(cwd, { title, description });
+	}
+
+	async listTrackers(cwd: string): Promise<TrackerRecord[]> {
+		return this.trackerStore.list(cwd);
+	}
+
+	async readTracker(cwd: string, id: string): Promise<{ record: TrackerRecord; markdown: string; trackerPath: string }> {
+		return this.trackerStore.readMarkdown(cwd, id);
+	}
+
+	async commentTracker(cwd: string, id: string, branch: string, body: string): Promise<{ record: TrackerRecord; branchPath: string }> {
+		const result = await this.trackerStore.appendComment(cwd, id, {
+			branch,
+			author: "leader",
+			body,
+		});
+		return { record: result.record, branchPath: result.branchPath };
 	}
 
 	async stop(id: string): Promise<SubagentRecord> {

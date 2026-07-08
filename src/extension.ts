@@ -4,7 +4,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { LEADER_SYSTEM_PROMPT } from "./prompt.ts";
 import { SubagentManager } from "./subagent-manager.ts";
 import {
+	createCommentTrackerTool,
+	createCreateTrackerTool,
 	createListAvailableModelsTool,
+	createListTrackersTool,
+	createReadTrackerTool,
 	createSendToSubagentTool,
 	createSpawnSubagentTool,
 } from "./tools.ts";
@@ -23,6 +27,10 @@ const LEADER_EXTENSION_NAMES = [
 function getLeaderTools(): string[] {
 	return [
 		"bash",
+		"create_tracker",
+		"list_trackers",
+		"read_tracker",
+		"comment_tracker",
 		"spawn_subagent",
 		"send_to_subagent",
 		"list_available_models",
@@ -70,6 +78,10 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 
 		pi.registerTool(createSpawnSubagentTool(manager));
 		pi.registerTool(createSendToSubagentTool(manager));
+		pi.registerTool(createCreateTrackerTool(manager));
+		pi.registerTool(createListTrackersTool(manager));
+		pi.registerTool(createReadTrackerTool(manager));
+		pi.registerTool(createCommentTrackerTool(manager));
 		pi.registerTool(createListAvailableModelsTool());
 
 		pi.registerCommand("leader", {
