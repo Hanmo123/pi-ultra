@@ -30,6 +30,7 @@ export function createSpawnSubagentTool(manager: SubagentManager) {
 			"Use spawn_subagent when you need a separate agent to explore, code, or test in parallel.",
 			"Use spawn_subagent instead of doing the delegated work directly in leader mode.",
 			"All subagents work in isolated worktrees with separate git branches.",
+			"For coding tasks, tell the subagent to commit completed work and report the commit hash.",
 			"Specify a descriptive branch name for the subagent's work.",
 		],
 		parameters: Type.Object({
@@ -86,9 +87,10 @@ export function createMergeSubagentWorktreeTool(manager: SubagentManager) {
 	return defineTool({
 		name: "merge_subagent_worktree",
 		label: "Merge Subagent Worktree",
-		description: "Merge a worktree-backed subagent branch into a target branch.",
+		description: "Merge a worktree-backed subagent branch into a target branch, defaulting to the current branch.",
 		promptGuidelines: [
 			"Use merge_subagent_worktree when a worktree-backed subagent has completed coding and its branch should be merged.",
+			"Omit 'into' to merge into the leader session's current branch unless the user explicitly requested another branch.",
 			"Use strategy 'merge' (default) for a merge commit with --no-ff, or 'squash' to squash all commits into one.",
 			"If conflicts are reported, send a message to the subagent with conflict details so it can resolve them in its worktree.",
 		],

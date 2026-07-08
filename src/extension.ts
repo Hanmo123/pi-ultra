@@ -16,6 +16,7 @@ const LEADER_STATE_TYPE = "leader-state";
 
 function getLeaderTools(): string[] {
 	return [
+		"bash",
 		"spawn_subagent",
 		"send_to_subagent",
 		"merge_subagent_worktree",
