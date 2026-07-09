@@ -1,6 +1,4 @@
-import { createRequire } from "node:module";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig, AgentRecord as PiSubagentRecord } from "@tintinweb/pi-subagents/dist/types.js";
 import {
 	cleanupBranchWorktree,
 	createBranchWorktree,
@@ -8,15 +6,14 @@ import {
 	type BranchWorktreeInfo,
 } from "./branch-worktree.ts";
 import { LEADER_SYSTEM_PROMPT, SUBAGENT_SYSTEM_PROMPT } from "./prompt.ts";
+import { AgentManager } from "./subagents/agent-manager.ts";
+import { getAgentConfig, registerAgents, resolveType } from "./subagents/agent-types.ts";
+import { loadCustomAgents } from "./subagents/custom-agents.ts";
+import { DEFAULT_AGENTS } from "./subagents/default-agents.ts";
+import { resolveModel } from "./subagents/model-resolver.ts";
+import type { AgentConfig, AgentRecord as InternalAgentRecord } from "./subagents/types.ts";
 import { TrackerStore } from "./tracker-store.ts";
 import type { ModelChoice, SubagentRecord, TrackerRecord } from "./types.ts";
-
-const require = createRequire(import.meta.url);
-const { AgentManager: PiSubagentsAgentManager } = require("@tintinweb/pi-subagents/dist/agent-manager.js") as typeof import("@tintinweb/pi-subagents/dist/agent-manager.js");
-const { DEFAULT_AGENTS } = require("@tintinweb/pi-subagents/dist/default-agents.js") as typeof import("@tintinweb/pi-subagents/dist/default-agents.js");
-const { getAgentConfig, registerAgents, resolveType } = require("@tintinweb/pi-subagents/dist/agent-types.js") as typeof import("@tintinweb/pi-subagents/dist/agent-types.js");
-const { loadCustomAgents } = require("@tintinweb/pi-subagents/dist/custom-agents.js") as typeof import("@tintinweb/pi-subagents/dist/custom-agents.js");
-const { resolveModel } = require("@tintinweb/pi-subagents/dist/model-resolver.js") as typeof import("@tintinweb/pi-subagents/dist/model-resolver.js");
 
 export interface SubagentUpdateDetail {
 	id: string;
@@ -63,7 +60,7 @@ function formatSubagentUpdate(updates: SubagentUpdateDetail[]): string {
 
 export class SubagentManager {
 	protected readonly pi: ExtensionAPI;
-	private readonly manager: PiSubagentsAgentManager;
+	private readonly manager: AgentManager;
 	private readonly trackerStore: TrackerStore;
 	private readonly leaderExtensionNames: string[];
 	private readonly metadata = new Map<
@@ -85,7 +82,7 @@ export class SubagentManager {
 		this.pi = pi;
 		this.leaderExtensionNames = options.leaderExtensionNames;
 		this.trackerStore = options.trackerStore ?? new TrackerStore();
-		this.manager = new PiSubagentsAgentManager((record) => {
+		this.manager = new AgentManager((record) => {
 			void this.handleSubagentComplete(record);
 		});
 	}
@@ -159,7 +156,7 @@ export class SubagentManager {
 		return `${model.provider}/${model.modelId}`;
 	}
 
-	private mapRecord(record: PiSubagentRecord): SubagentRecord {
+	private mapRecord(record: InternalAgentRecord): SubagentRecord {
 		const metadata = this.metadata.get(record.id);
 		const localWorktree = metadata?.worktree;
 		const localResult = metadata?.worktreeResult;
@@ -197,7 +194,7 @@ export class SubagentManager {
 		};
 	}
 
-	private cleanupManagedWorktree(record: PiSubagentRecord): BranchWorktreeCleanupResult | undefined {
+	private cleanupManagedWorktree(record: InternalAgentRecord): BranchWorktreeCleanupResult | undefined {
 		const metadata = this.metadata.get(record.id);
 		if (!metadata?.worktree) {
 			return undefined;
@@ -230,7 +227,7 @@ export class SubagentManager {
 		};
 	}
 
-	private async handleSubagentComplete(record: PiSubagentRecord): Promise<void> {
+	private async handleSubagentComplete(record: InternalAgentRecord): Promise<void> {
 		this.cleanupManagedWorktree(record);
 		const mapped = this.mapRecord(record);
 		let archive: { trackerPath?: string; branchPath?: string; error?: string } | undefined;
@@ -254,7 +251,7 @@ export class SubagentManager {
 		this.enqueueUpdate(this.buildUpdate(mapped, archive));
 	}
 
-	private requireRecord(id: string): PiSubagentRecord {
+	private requireRecord(id: string): InternalAgentRecord {
 		const record = this.manager.getRecord(id);
 		if (!record) {
 			throw new Error(`Unknown subagent: ${id}`);
@@ -266,7 +263,7 @@ export class SubagentManager {
 		ctx: ExtensionContext;
 		task: string;
 		cwd: string;
-		label?: string;
+		name?: string;
 		model?: ModelChoice;
 		subagentType?: string;
 		trackerId?: string;
@@ -279,7 +276,7 @@ export class SubagentManager {
 		const modelInput = agentConfig?.model ?? this.modelChoiceToString(options.model);
 		const modelFromParams = agentConfig?.model == null && modelInput != null;
 
-		let model: ReturnType<typeof resolveModel> | undefined;
+		let model: Exclude<ReturnType<typeof resolveModel>, string> | undefined;
 		if (modelInput) {
 			const resolvedModel = resolveModel(modelInput, options.ctx.modelRegistry);
 			if (typeof resolvedModel === "string") {
@@ -291,11 +288,12 @@ export class SubagentManager {
 			}
 		}
 
-		const description = options.label?.trim() || summarizeTask(options.task);
+		const displayName = options.name?.trim() || undefined;
+		const description = displayName || summarizeTask(options.task);
 		const tracker = options.trackerId
 			? await this.trackerStore.get(options.cwd, options.trackerId)
 			: await this.trackerStore.create(options.cwd, { title: description, description: options.task });
-		const worktree = createBranchWorktree(options.cwd);
+		const worktree = createBranchWorktree(options.cwd, displayName);
 		if (!worktree) {
 			throw new Error('Cannot run with isolation: "worktree" - failed to create a branch-backed git worktree. Initialize git and commit at least once, or fix git worktree creation.');
 		}
@@ -311,7 +309,6 @@ export class SubagentManager {
 				inheritContext: agentConfig?.inheritContext ?? false,
 				thinkingLevel: agentConfig?.thinking ?? options.model?.thinkingLevel,
 				isBackground: true,
-				isolation: undefined,
 			});
 		} catch (error) {
 			cleanupBranchWorktree(options.cwd, worktree, description);
@@ -321,7 +318,7 @@ export class SubagentManager {
 		this.metadata.set(id, {
 			cwd: options.cwd,
 			description,
-			label: options.label?.trim() || undefined,
+			label: displayName,
 			model: options.model,
 			trackerId: tracker.id,
 			worktree,

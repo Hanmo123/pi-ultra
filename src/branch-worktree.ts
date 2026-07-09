@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
@@ -16,6 +16,24 @@ export interface BranchWorktreeCleanupResult {
 	branch?: string;
 	path?: string;
 	error?: string;
+}
+
+const WORKTREE_ROOT = join(tmpdir(), "pi-leader-worktrees");
+const MAX_HINT_LENGTH = 80;
+
+export function sanitizeWorktreeNameHint(nameHint?: string): string {
+	const fallback = randomUUID().slice(0, 17);
+	const raw = nameHint?.trim() || fallback;
+	const sanitized = raw
+		.replace(/[\\/]+/gu, "-")
+		.replace(/[^a-zA-Z0-9._-]+/gu, "-")
+		.replace(/\.{2,}/gu, ".")
+		.replace(/-+/gu, "-")
+		.replace(/^[.-]+/u, "")
+		.slice(0, MAX_HINT_LENGTH)
+		.replace(/[.-]+$/u, "");
+
+	return sanitized || fallback;
 }
 
 function removeWorktree(cwd: string, worktreePath: string): void {
@@ -54,7 +72,7 @@ function currentBranch(cwd: string): string | undefined {
 	}
 }
 
-export function createBranchWorktree(cwd: string, idHint = randomUUID().slice(0, 17)): BranchWorktreeInfo | undefined {
+export function createBranchWorktree(cwd: string, nameHint?: string): BranchWorktreeInfo | undefined {
 	let baseSha: string;
 	let subdir: string;
 	try {
@@ -62,14 +80,16 @@ export function createBranchWorktree(cwd: string, idHint = randomUUID().slice(0,
 		baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd, stdio: "pipe", timeout: 5000 }).toString().trim();
 		const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe", timeout: 5000 }).toString().trim();
 		subdir = relative(realpathSync(topLevel), realpathSync(cwd));
+		mkdirSync(WORKTREE_ROOT, { recursive: true });
 	} catch {
 		return undefined;
 	}
 
+	const safeHint = sanitizeWorktreeNameHint(nameHint);
 	for (let attempt = 0; attempt < 3; attempt++) {
 		const suffix = randomUUID().slice(0, 8);
-		const branch = `pi-agent-${idHint}-${suffix}`;
-		const worktreePath = join(tmpdir(), `pi-agent-${idHint}-${suffix}`);
+		const branch = `pi-agent-${safeHint}-${suffix}`;
+		const worktreePath = join(WORKTREE_ROOT, branch);
 		try {
 			execFileSync("git", ["worktree", "add", "-b", branch, worktreePath, "HEAD"], {
 				cwd,
