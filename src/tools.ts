@@ -1,6 +1,12 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	formatPiUltraModelChoices,
+	loadPiUltraModelChoices,
+	PI_ULTRA_CHOICES_KEY,
+	PI_ULTRA_MODELS_PATH,
+} from "./model-config.ts";
 import type { SubagentManager } from "./subagent-manager.ts";
 
 const ThinkingLevelSchema = Type.Union(
@@ -192,14 +198,22 @@ export function createListAvailableModelsTool() {
 		description: "List models currently available to the leader session for subagent selection.",
 		promptGuidelines: [
 			"Use list_available_models before spawning subagents when model selection matters and you need the actual available provider/model ids.",
+			"Treat configured pi-ultra-choices as soft guidance; map natural-language model names to the closest available provider/model id.",
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const models = await ctx.modelRegistry.getAvailable();
-			const text = models.map((model) => `${model.provider}/${model.id}`).join("\n") || "No available models.";
+			const [models, modelChoices] = await Promise.all([
+				ctx.modelRegistry.getAvailable(),
+				loadPiUltraModelChoices(),
+			]);
+			const modelText = models.map((model) => `${model.provider}/${model.id}`).join("\n") || "No available models.";
+			const choiceText = modelChoices.length > 0
+				? `${PI_ULTRA_CHOICES_KEY}:\n${formatPiUltraModelChoices(modelChoices)}`
+				: `No configured ${PI_ULTRA_CHOICES_KEY}.`;
+			const text = `${modelText}\n\n${choiceText}`;
 			return {
 				content: [{ type: "text", text }],
-				details: { models },
+				details: { models, [PI_ULTRA_CHOICES_KEY]: modelChoices, configPath: PI_ULTRA_MODELS_PATH },
 			};
 		},
 	});
