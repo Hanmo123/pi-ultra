@@ -2,6 +2,7 @@ import { basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { LEADER_SYSTEM_PROMPT } from "./prompt.ts";
+import { LeaderSidebarController } from "./sidebar.ts";
 import { SubagentManager } from "./subagent-manager.ts";
 import {
 	createCommentTrackerTool,
@@ -18,6 +19,7 @@ export interface LeaderExtensionOptions {
 }
 
 const LEADER_STATE_TYPE = "leader-state";
+const LEADER_SIDEBAR_STATE_TYPE = "leader-sidebar-state";
 const LEADER_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const LEADER_EXTENSION_NAMES = [
 	basename(LEADER_EXTENSION_PATH).replace(/\.(ts|js)$/u, ""),
@@ -42,6 +44,7 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 		const manager = options.createManager
 			? options.createManager(pi, LEADER_EXTENSION_NAMES[0])
 			: new SubagentManager(pi, { leaderExtensionNames: LEADER_EXTENSION_NAMES });
+		const sidebar = new LeaderSidebarController(manager, true);
 		let leaderEnabled = true;
 		let toolsBeforeLeader: string[] | undefined;
 
@@ -49,6 +52,12 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 			pi.appendEntry(LEADER_STATE_TYPE, {
 				enabled: leaderEnabled,
 				toolsBeforeLeader,
+			});
+		}
+
+		function persistSidebarState(): void {
+			pi.appendEntry(LEADER_SIDEBAR_STATE_TYPE, {
+				enabled: sidebar.isEnabled(),
 			});
 		}
 
@@ -110,6 +119,36 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 			},
 		});
 
+		pi.registerCommand("leader-sidebar", {
+			description: "Show, hide, or inspect the live leader sidebar",
+			handler: async (args, ctx) => {
+				const trimmed = args.trim();
+				if (!trimmed) {
+					sidebar.setEnabled(!sidebar.isEnabled());
+					persistSidebarState();
+					ctx.ui.notify(sidebar.statusText(ctx.mode), "info");
+					return;
+				}
+				if (trimmed === "on") {
+					sidebar.setEnabled(true);
+					persistSidebarState();
+					ctx.ui.notify(sidebar.statusText(ctx.mode), "info");
+					return;
+				}
+				if (trimmed === "off") {
+					sidebar.setEnabled(false);
+					persistSidebarState();
+					ctx.ui.notify(sidebar.statusText(ctx.mode), "info");
+					return;
+				}
+				if (trimmed === "status") {
+					ctx.ui.notify(sidebar.statusText(ctx.mode), "info");
+					return;
+				}
+				ctx.ui.notify("Usage: /leader-sidebar [on|off|status]", "warning");
+			},
+		});
+
 		pi.on("session_start", async (_event, ctx) => {
 			const stateEntries = ctx.sessionManager
 				.getEntries()
@@ -120,13 +159,22 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 			const latestState = stateEntries.at(-1) as
 				| { data?: { enabled?: boolean; toolsBeforeLeader?: string[] } }
 				| undefined;
+			const sidebarEntries = ctx.sessionManager
+				.getEntries()
+				.filter(
+					(entry: { type: string; customType?: string }) =>
+						entry.type === "custom" && entry.customType === LEADER_SIDEBAR_STATE_TYPE,
+				);
+			const latestSidebarState = sidebarEntries.at(-1) as { data?: { enabled?: boolean } } | undefined;
 			leaderEnabled = latestState?.data?.enabled ?? true;
 			toolsBeforeLeader = latestState?.data?.toolsBeforeLeader;
+			sidebar.setEnabled(latestSidebarState?.data?.enabled ?? true);
 			if (leaderEnabled) {
 				enableLeaderMode(ctx);
 			} else {
 				updateStatus(ctx);
 			}
+			sidebar.attachToSession(ctx);
 		});
 
 		pi.on("before_agent_start", async (event) => {
@@ -145,6 +193,7 @@ export function createLeaderExtension(options: LeaderExtensionOptions = {}) {
 		});
 
 		pi.on("session_shutdown", async () => {
+			sidebar.disposeOverlay();
 			await manager.shutdown();
 		});
 	};

@@ -31,6 +31,15 @@ interface SpawnOptions {
 	onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
 }
 
+interface ResumeOptions {
+	onToolActivity?: (activity: ToolActivity) => void;
+	onTextDelta?: (delta: string, fullText: string) => void;
+	onTurnEnd?: (turnCount: number) => void;
+	onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+	onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+	signal?: AbortSignal;
+}
+
 interface SpawnArgs {
 	pi: ExtensionAPI;
 	ctx: ExtensionContext;
@@ -233,7 +242,7 @@ export class AgentManager {
 		}
 	}
 
-	async resume(id: string, prompt: string, signal?: AbortSignal): Promise<AgentRecord | undefined> {
+	async resume(id: string, prompt: string, options: ResumeOptions = {}): Promise<AgentRecord | undefined> {
 		const record = this.agents.get(id);
 		if (!record?.session) {
 			return undefined;
@@ -243,20 +252,32 @@ export class AgentManager {
 		record.completedAt = undefined;
 		record.result = undefined;
 		record.error = undefined;
+		this.onStart?.(record);
 
 		try {
+			let turnCount = 0;
 			const responseText = await resumeAgent(record.session, prompt, {
 				onToolActivity: (activity) => {
 					if (activity.type === "end") {
 						record.toolUses++;
 					}
+					options.onToolActivity?.(activity);
 				},
-				onAssistantUsage: (usage) => addUsage(record.lifetimeUsage, usage),
+				onTextDelta: options.onTextDelta,
+				onTurnEnd: () => {
+					turnCount++;
+					options.onTurnEnd?.(turnCount);
+				},
+				onAssistantUsage: (usage) => {
+					addUsage(record.lifetimeUsage, usage);
+					options.onAssistantUsage?.(usage);
+				},
 				onCompaction: (info) => {
 					record.compactionCount++;
 					this.onCompact?.(record, info);
+					options.onCompaction?.(info);
 				},
-				signal,
+				signal: options.signal,
 			});
 			record.status = "completed";
 			record.result = responseText;
@@ -265,6 +286,12 @@ export class AgentManager {
 			record.status = "error";
 			record.error = error instanceof Error ? error.message : String(error);
 			record.completedAt = Date.now();
+		}
+
+		try {
+			this.onComplete?.(record);
+		} catch {
+			// Completion callbacks should not change agent lifecycle state.
 		}
 
 		return record;

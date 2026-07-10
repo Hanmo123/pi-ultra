@@ -26,7 +26,42 @@ export interface SubagentUpdateDetail {
 	error?: string;
 }
 
+export interface SubagentSidebarRecord {
+	id: string;
+	label?: string;
+	description: string;
+	status: SubagentRecord["status"];
+	subagentType: string;
+	trackerId?: string;
+	branch?: string;
+	cwd: string;
+	currentTool?: string;
+	lastTool?: string;
+	turnCount: number;
+	updatedAt: string;
+	previewLines: string[];
+}
+
 const DEFAULT_SUBAGENT_TYPE = "general-purpose";
+const SIDEBAR_PREVIEW_CHAR_LIMIT = 4000;
+const SIDEBAR_PREVIEW_LINE_LIMIT = 5;
+
+function trimPreviewText(text: string): string {
+	const normalized = text.replace(/\r\n?/g, "\n").trim();
+	if (normalized.length <= SIDEBAR_PREVIEW_CHAR_LIMIT) {
+		return normalized;
+	}
+	return normalized.slice(-SIDEBAR_PREVIEW_CHAR_LIMIT).trimStart();
+}
+
+function previewLinesFromText(text: string): string[] {
+	return trimPreviewText(text)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.slice(-SIDEBAR_PREVIEW_LINE_LIMIT);
+}
+
 function stripLeaderPrompt(systemPrompt: string): string {
 	const suffix = `\n\n${LEADER_SYSTEM_PROMPT}`;
 	if (systemPrompt.endsWith(suffix)) {
@@ -63,6 +98,17 @@ export class SubagentManager {
 	private readonly manager: AgentManager;
 	private readonly trackerStore: TrackerStore;
 	private readonly leaderExtensionNames: string[];
+	private readonly sidebarState = new Map<
+		string,
+		{
+			assistantText: string;
+			currentTool?: string;
+			lastTool?: string;
+			turnCount: number;
+			updatedAt: number;
+		}
+	>();
+	private readonly sidebarListeners = new Set<() => void>();
 	private readonly metadata = new Map<
 		string,
 		{
@@ -77,6 +123,7 @@ export class SubagentManager {
 	>();
 	private readonly pendingUpdates = new Map<string, SubagentUpdateDetail>();
 	private flushScheduled = false;
+	private sidebarFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(pi: ExtensionAPI, options: { leaderExtensionNames: string[]; trackerStore?: TrackerStore }) {
 		this.pi = pi;
@@ -84,6 +131,116 @@ export class SubagentManager {
 		this.trackerStore = options.trackerStore ?? new TrackerStore();
 		this.manager = new AgentManager((record) => {
 			void this.handleSubagentComplete(record);
+		}, undefined, (record) => {
+			this.handleSubagentStart(record);
+		});
+	}
+
+	private ensureSidebarState(id: string): {
+		assistantText: string;
+		currentTool?: string;
+		lastTool?: string;
+		turnCount: number;
+		updatedAt: number;
+	} {
+		let state = this.sidebarState.get(id);
+		if (!state) {
+			state = {
+				assistantText: "",
+				turnCount: 0,
+				updatedAt: Date.now(),
+			};
+			this.sidebarState.set(id, state);
+		}
+		return state;
+	}
+
+	private scheduleSidebarFlush(): void {
+		if (this.sidebarFlushTimer) {
+			return;
+		}
+		this.sidebarFlushTimer = setTimeout(() => {
+			this.sidebarFlushTimer = undefined;
+			for (const listener of this.sidebarListeners) {
+				try {
+					listener();
+				} catch {
+					// Sidebar listeners should not affect agent state.
+				}
+			}
+		}, 75);
+		this.sidebarFlushTimer.unref?.();
+	}
+
+	private updateSidebarState(
+		id: string,
+		updater: (state: { assistantText: string; currentTool?: string; lastTool?: string; turnCount: number; updatedAt: number }) => void,
+	): void {
+		const state = this.ensureSidebarState(id);
+		updater(state);
+		state.updatedAt = Date.now();
+		this.scheduleSidebarFlush();
+	}
+
+	private buildLiveCallbacks(getId: () => string): {
+		onTextDelta: (delta: string, fullText: string) => void;
+		onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => void;
+		onTurnEnd: (turnCount: number) => void;
+	} {
+		return {
+			onTextDelta: (_delta, fullText) => {
+				const id = getId();
+				if (!id) {
+					return;
+				}
+				this.updateSidebarState(id, (state) => {
+					state.assistantText = trimPreviewText(fullText);
+				});
+			},
+			onToolActivity: (activity) => {
+				const id = getId();
+				if (!id) {
+					return;
+				}
+				this.updateSidebarState(id, (state) => {
+					if (activity.type === "start") {
+						state.currentTool = activity.toolName;
+						return;
+					}
+					state.lastTool = activity.toolName;
+					if (state.currentTool === activity.toolName) {
+						state.currentTool = undefined;
+					}
+				});
+			},
+			onTurnEnd: (turnCount) => {
+				const id = getId();
+				if (!id) {
+					return;
+				}
+				this.updateSidebarState(id, (state) => {
+					state.turnCount = turnCount;
+				});
+			},
+		};
+	}
+
+	private syncSidebarStateFromRecord(record: InternalAgentRecord): void {
+		this.updateSidebarState(record.id, (state) => {
+			const preview = record.result?.trim() || record.error?.trim();
+			if (preview) {
+				state.assistantText = trimPreviewText(preview);
+			}
+			state.currentTool = undefined;
+		});
+	}
+
+	private handleSubagentStart(record: InternalAgentRecord): void {
+		this.updateSidebarState(record.id, (state) => {
+			state.assistantText = "";
+			state.currentTool = undefined;
+			state.lastTool = undefined;
+			state.turnCount = 0;
 		});
 	}
 
@@ -118,6 +275,54 @@ export class SubagentManager {
 	private enqueueUpdate(update: SubagentUpdateDetail): void {
 		this.pendingUpdates.set(update.id, update);
 		this.scheduleFlush();
+	}
+
+	subscribeSidebar(listener: () => void): () => void {
+		this.sidebarListeners.add(listener);
+		return () => {
+			this.sidebarListeners.delete(listener);
+		};
+	}
+
+	listSidebarRecords(): SubagentSidebarRecord[] {
+		const statusRank: Record<SubagentRecord["status"], number> = {
+			running: 0,
+			queued: 1,
+			steered: 2,
+			completed: 3,
+			error: 4,
+			aborted: 5,
+			stopped: 6,
+		};
+
+		return this.manager.listAgents()
+			.map((record) => {
+				const mapped = this.mapRecord(record);
+				const sidebarState = this.ensureSidebarState(record.id);
+				const previewSource = sidebarState.assistantText || mapped.result?.trim() || mapped.error?.trim() || "";
+				return {
+					id: mapped.id,
+					label: mapped.label,
+					description: mapped.description,
+					status: mapped.status,
+					subagentType: mapped.subagentType,
+					trackerId: mapped.trackerId,
+					branch: mapped.worktreeResult?.branch ?? mapped.worktree?.branch,
+					cwd: mapped.cwd,
+					currentTool: sidebarState.currentTool,
+					lastTool: sidebarState.lastTool,
+					turnCount: sidebarState.turnCount,
+					updatedAt: new Date(sidebarState.updatedAt).toISOString(),
+					previewLines: previewLinesFromText(previewSource),
+				};
+			})
+			.sort((left, right) => {
+				const statusDelta = statusRank[left.status] - statusRank[right.status];
+				if (statusDelta !== 0) {
+					return statusDelta;
+				}
+				return right.updatedAt.localeCompare(left.updatedAt);
+			});
 	}
 
 	private buildLeaderSafeConfig(config: AgentConfig, parentSystemPrompt: string): AgentConfig {
@@ -229,6 +434,7 @@ export class SubagentManager {
 
 	private async handleSubagentComplete(record: InternalAgentRecord): Promise<void> {
 		this.cleanupManagedWorktree(record);
+		this.syncSidebarStateFromRecord(record);
 		const mapped = this.mapRecord(record);
 		let archive: { trackerPath?: string; branchPath?: string; error?: string } | undefined;
 		if (mapped.trackerId) {
@@ -299,6 +505,8 @@ export class SubagentManager {
 		}
 
 		let id: string;
+		let liveId = "";
+		const liveCallbacks = this.buildLiveCallbacks(() => liveId);
 		try {
 			id = this.manager.spawn(this.pi, options.ctx, subagentType, options.task, {
 				description,
@@ -309,7 +517,9 @@ export class SubagentManager {
 				inheritContext: agentConfig?.inheritContext ?? false,
 				thinkingLevel: agentConfig?.thinking ?? options.model?.thinkingLevel,
 				isBackground: true,
+				...liveCallbacks,
 			});
+			liveId = id;
 		} catch (error) {
 			cleanupBranchWorktree(options.cwd, worktree, description);
 			throw error;
@@ -322,6 +532,12 @@ export class SubagentManager {
 			model: options.model,
 			trackerId: tracker.id,
 			worktree,
+		});
+		this.updateSidebarState(id, (state) => {
+			state.assistantText = "";
+			state.currentTool = undefined;
+			state.lastTool = undefined;
+			state.turnCount = 0;
 		});
 
 		return this.mapRecord(this.requireRecord(id));
@@ -338,7 +554,7 @@ export class SubagentManager {
 		if (mode === "steer") {
 			throw new Error(`Subagent ${id} is not running; current status is ${record.status}`);
 		}
-		const resumed = await this.manager.resume(id, message);
+		const resumed = await this.manager.resume(id, message, this.buildLiveCallbacks(() => id));
 		if (!resumed) {
 			throw new Error(`Subagent ${id} cannot be resumed`);
 		}
@@ -382,6 +598,7 @@ export class SubagentManager {
 		if (!record.promise) {
 			this.cleanupManagedWorktree(record);
 		}
+		this.syncSidebarStateFromRecord(record);
 		return this.mapRecord(record);
 	}
 
@@ -391,6 +608,12 @@ export class SubagentManager {
 			this.cleanupManagedWorktree(record);
 		}
 		this.manager.dispose();
+		if (this.sidebarFlushTimer) {
+			clearTimeout(this.sidebarFlushTimer);
+			this.sidebarFlushTimer = undefined;
+		}
+		this.sidebarListeners.clear();
+		this.sidebarState.clear();
 		this.metadata.clear();
 		this.pendingUpdates.clear();
 	}
